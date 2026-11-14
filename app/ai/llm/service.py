@@ -16,6 +16,7 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 
 from app.ai.llm.base import (
+    GeneratedImage,
     ImageInput,
     LLMConfigError,
     LLMError,
@@ -82,6 +83,49 @@ class LLMService:
         )
         response = await self._call(request, ctx)
         return response.text.strip()
+
+    @property
+    def supports_image_generation(self) -> bool:
+        return getattr(self._provider, "supports_image_generation", False)
+
+    async def generate_image(self, messages: list[LLMMessage], *, ctx: CallContext) -> GeneratedImage:
+        """Картинка по описанию (у GigaChat — Kandinsky). Та же очередь и тот же учёт, что у текста."""
+        if not self.supports_image_generation:
+            raise LLMConfigError("Подключённая модель не умеет рисовать картинки")
+        model = self.model_for(ModelProfile.SMART)
+        started = time.monotonic()
+        try:
+            async with self._limiter.slot():
+                started = time.monotonic()
+                image = await self._provider.generate_image(model, messages)
+        except LLMError as exc:
+            await self._usage.record(
+                UsageRecord(
+                    purpose=ctx.purpose,
+                    provider=self._provider.name,
+                    model=model,
+                    status=LLMCallStatus.ERROR,
+                    latency_ms=_elapsed_ms(started),
+                    project_id=ctx.project_id,
+                    user_id=ctx.user_id,
+                    error=f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_CHARS],
+                )
+            )
+            raise
+        await self._usage.record(
+            UsageRecord(
+                purpose=ctx.purpose,
+                provider=self._provider.name,
+                model=image.model or model,
+                status=LLMCallStatus.OK,
+                input_tokens=image.usage.input_tokens,
+                output_tokens=image.usage.output_tokens,
+                latency_ms=_elapsed_ms(started),
+                project_id=ctx.project_id,
+                user_id=ctx.user_id,
+            )
+        )
+        return image
 
     async def text(
         self,

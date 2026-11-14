@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -143,7 +144,7 @@ async def test_plan_buttons_approve_write_and_redo(session: AsyncSession, test_s
     )
     await session.flush()
 
-    shown = await orchestrator.handle_command(turn, Intent.SHOW_SCHEDULE, "/schedule")
+    shown = await orchestrator.handle_button(turn, Action.PLAN_SHOW, "")
     assert "«Как выбрать зерно»" in shown.text
 
     approved = await orchestrator.handle_button(turn, Action.PLAN_APPROVE, str(plan.id))
@@ -213,6 +214,7 @@ async def test_preferences_are_shown_and_forgotten(session: AsyncSession, test_s
 @dataclass
 class FakeContentService:
     error: Exception | None = None
+    session_factory: Any = None
 
     async def generate_strategy(self, project_id, user_id, *, instructions=None):
         if self.error:
@@ -221,16 +223,38 @@ class FakeContentService:
         return row, strategy()
 
     async def write_plan_posts(self, project_id, user_id, plan_id):
+        from app.db.models import PublicationVariant
+        from app.domain.enums import ActorType, Platform, PublicationStatus
+        from app.domain.publications.refs import PostRef
+        from app.services.publications import PublicationService
+
         for title in ("Первый", "Второй"):
-            pub = Publication(
-                project_id=project_id,
-                category="Полезное",
-                goal="education",
-                topic=title,
-                title=title,
-                brief="",
+            async with self.session_factory() as session:
+                pub = Publication(
+                    project_id=project_id,
+                    category="Полезное",
+                    goal="education",
+                    topic=title,
+                    title=title,
+                    brief="",
+                )
+                session.add(pub)
+                await session.flush()
+                variant = PublicationVariant(
+                    publication_id=pub.id, platform=Platform.TELEGRAM, status=PublicationStatus.DRAFT
+                )
+                session.add(variant)
+                await session.flush()
+                version = await PublicationService(session).add_version(
+                    variant, body=f"<b>{title}</b>", hashtags=[], actor=ActorType.AI
+                )
+                await session.commit()
+            yield DraftOutcome(
+                publication=pub,
+                text=f"<b>{title}</b>",
+                warnings=[],
+                ref=PostRef(variant.id, version.version_no),
             )
-            yield DraftOutcome(publication=pub, text=f"<b>{title}</b>", warnings=[])
 
     async def generate_plan(self, *args, **kwargs) -> PlanOutcome:  # pragma: no cover — не используется
         raise NotImplementedError
@@ -242,9 +266,12 @@ class FakeDeps:
     session_factory: object
     content_service: FakeContentService
     notifier: MemoryNotifier
+    storage: object = None
+    settings: object = None
 
 
 async def run_job(session_factory, redis: Redis, service: FakeContentService, project: Project, kind, **kw):
+    service.session_factory = session_factory
     deps = FakeDeps(
         redis=redis, session_factory=session_factory, content_service=service, notifier=MemoryNotifier()
     )
@@ -274,9 +301,29 @@ async def test_worker_sends_strategy_posts_and_errors(engine, redis_client: Redi
         sent = await run_job(
             factory, redis_client, FakeContentService(), project, ContentJobKind.PLAN_POSTS, plan_id=uuid4()
         )
-        assert all(r.text.startswith("<b>Черновик поста</b> · Полезное") for _, r in sent[:2])
-        assert "<b>Первый</b>" in sent[0][1].text
-        assert "написал черновиков — 2" in sent[-1][1].text
+        assert sent[0][1].text.startswith("<b>1. «Первый»</b>") and sent[1][1].text.startswith(
+            "<b>2. «Второй»</b>"
+        )
+        assert "<b>Первый</b>" in sent[0][1].text and "Полезное" in sent[0][1].text
+        assert sent[0][1].buttons[0][0].action is Action.POST_APPROVE  # превью сразу с кнопками согласования
+        assert "написал постов — 2" in sent[-1][1].text
+        # Показанные превью перешли в «ждёт одобрения» и запомнены для ответов-правок.
+        from sqlalchemy import select
+
+        from app.db.models import PostMessage, PublicationVariant
+
+        async with factory() as session:
+            statuses = set(
+                await session.scalars(
+                    select(PublicationVariant.status)
+                    .join(Publication, Publication.id == PublicationVariant.publication_id)
+                    .where(Publication.project_id == project.id)
+                )
+            )
+            assert statuses == {"pending_approval"}
+            assert (
+                len(list(await session.scalars(select(PostMessage.id).where(PostMessage.chat_id == 42)))) == 2
+            )
 
         sent = await run_job(
             factory,

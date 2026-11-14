@@ -17,11 +17,15 @@ from app.bot.notifier import Notifier, TelegramNotifier
 from app.core.config import Settings
 from app.db.session import create_engine, create_session_factory
 from app.domain.enums import Platform
+from app.integrations.social.base import Publisher
+from app.integrations.social.telegram import TelegramPublisher
+from app.integrations.storage.base import FileStorage
 from app.integrations.storage.local import LocalFileStorage
 from app.integrations.web.crawler import SiteCrawler
 from app.integrations.web.fetcher import SafeFetcher
 from app.services.content_generation import ContentGenerationService
 from app.services.profile_analysis import ProfileAnalysisService
+from app.services.publishing import PublishingService
 
 
 @dataclass(slots=True)
@@ -34,6 +38,8 @@ class WorkerDeps:
     fetcher: SafeFetcher | None
     profile_service: ProfileAnalysisService
     content_service: ContentGenerationService
+    publishing_service: PublishingService
+    storage: FileStorage
     notifier: Notifier
     bot: Bot | None = None
 
@@ -62,10 +68,12 @@ async def build_worker_deps(settings: Settings) -> WorkerDeps:
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    storage = LocalFileStorage(settings.files_dir)
+    publishers: dict[Platform, Publisher] = {Platform.TELEGRAM: TelegramPublisher(bot)}
     profile_service = ProfileAnalysisService(
         session_factory,
         llm=llm,
-        storage=LocalFileStorage(settings.files_dir),
+        storage=storage,
         crawler=SiteCrawler(fetcher, max_pages=settings.crawl_max_pages, delay_s=settings.crawl_delay_s),
     )
     return WorkerDeps(
@@ -76,7 +84,11 @@ async def build_worker_deps(settings: Settings) -> WorkerDeps:
         llm=llm,
         fetcher=fetcher,
         profile_service=profile_service,
-        content_service=ContentGenerationService(session_factory, llm=llm, platforms=[Platform.TELEGRAM]),
+        content_service=ContentGenerationService(
+            session_factory, llm=llm, platforms=[Platform.TELEGRAM], storage=storage
+        ),
+        publishing_service=PublishingService(session_factory, publishers=publishers, storage=storage),
+        storage=storage,
         notifier=TelegramNotifier(bot),
         bot=bot,
     )

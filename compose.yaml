@@ -76,6 +76,10 @@ services:
     <<: *app
     command: ["taskiq", "worker", "app.workers.broker:broker", "app.workers.tasks"]
 
+  scheduler:
+    <<: *app
+    command: ["python", "-m", "app.scheduler"]
+
 volumes:
   pgdata:
   redisdata:

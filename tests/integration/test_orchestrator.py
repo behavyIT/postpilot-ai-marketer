@@ -236,10 +236,10 @@ async def test_profile_shows_collected_sources(session: AsyncSession, test_setti
 
 async def test_user_text_is_html_escaped_in_replies(session: AsyncSession, test_settings: Settings) -> None:
     user = await make_user(session, 5014)
-    provider = FakeLLMProvider(intent("generate_image", topic="<script>alert(1)</script>"))
+    provider = FakeLLMProvider(intent("create_project", project_name="<script>alert(1)</script>"))
     orchestrator = make_orchestrator(session, test_settings, provider)
 
-    reply = await orchestrator.handle_text(await turn_for(session, user), "картинку про <script>")
+    reply = await orchestrator.handle_text(await turn_for(session, user), "новый проект <script>")
 
     assert "<script>" not in reply.text
     assert "&lt;script&gt;" in reply.text

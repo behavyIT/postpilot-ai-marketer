@@ -2,7 +2,8 @@
 
 Публикация — логический пост (тема, цель, рубрика, дата). Под каждую площадку у неё
 свой вариант со своим статусом, а тексты варианта хранятся неизменяемыми версиями:
-любая правка создаёт новую версию, и согласование всегда относится к конкретной.
+любая правка (текст или картинка) создаёт новую версию, и согласование всегда относится
+к конкретной.
 """
 
 from __future__ import annotations
@@ -128,6 +129,12 @@ class PublicationVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     external_post_id: Mapped[str | None] = mapped_column(String(128))
+    external_url: Mapped[str | None] = mapped_column(String(512))
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    # Куда публиковать — фиксируется при постановке в расписание.
+    social_account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("social_accounts.id", ondelete="SET NULL")
+    )
 
 
 class PublicationVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -148,6 +155,9 @@ class PublicationVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     change_request: Mapped[str | None] = mapped_column(Text)
     used_fact_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
     warnings: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
+    # Картинка — часть версии: её замена тоже требует нового одобрения.
+    media_file_id: Mapped[UUID | None] = mapped_column(ForeignKey("stored_files.id", ondelete="SET NULL"))
+    image_prompt: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentMemory(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):

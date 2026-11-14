@@ -62,14 +62,27 @@ class LLMResponse:
     usage: LLMUsageInfo = field(default_factory=LLMUsageInfo)
 
 
+@dataclass(frozen=True, slots=True)
+class GeneratedImage:
+    data: bytes
+    mime_type: str
+    model: str
+    usage: LLMUsageInfo = field(default_factory=LLMUsageInfo)
+
+
 class LLMProvider(Protocol):
     name: str
     # Умеет ли API принимать JSON Schema ответа параметром. Если да, схему не дублируем
     # текстом в промпте: у GigaChat Lite дублирование даёт пустые ответы (замер 14.11.2026).
     supports_json_schema: bool
     supports_images: bool
+    supports_image_generation: bool
 
     async def complete(self, request: LLMRequest) -> LLMResponse: ...
+
+    async def generate_image(self, model: str, messages: list[LLMMessage]) -> GeneratedImage:
+        """Нарисовать картинку по описанию. Вызывается, только если supports_image_generation."""
+        ...
 
     async def aclose(self) -> None: ...
 

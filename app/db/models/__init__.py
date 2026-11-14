@@ -13,11 +13,19 @@ from app.db.models.conversation import ConversationMessage
 from app.db.models.llm_usage import LLMUsage
 from app.db.models.profile import BusinessProfile, BusinessProfileVersion, ProfileFact
 from app.db.models.project import Project, ProjectMember
+from app.db.models.publishing import (
+    Approval,
+    PostMessage,
+    PublicationEvent,
+    PublishAttempt,
+    SocialAccount,
+)
 from app.db.models.source import BusinessDocument, BusinessNote, StoredFile, Website, WebsitePage
 from app.db.models.user import User
 
 __all__ = [
     "AgentMemory",
+    "Approval",
     "AuditLog",
     "BusinessDocument",
     "BusinessNote",
@@ -27,12 +35,16 @@ __all__ = [
     "ConversationMessage",
     "LLMUsage",
     "MarketingStrategy",
+    "PostMessage",
     "ProfileFact",
     "Project",
     "ProjectMember",
     "Publication",
+    "PublicationEvent",
     "PublicationVariant",
     "PublicationVersion",
+    "PublishAttempt",
+    "SocialAccount",
     "StoredFile",
     "User",
     "Website",

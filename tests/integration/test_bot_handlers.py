@@ -20,21 +20,25 @@ from app.bot.middlewares import RateLimitMiddleware
 from app.bot.render import send_reply
 from app.bot.states import ProjectStates
 from app.core.config import Settings
+from tests.fakes import FakeBot
 from tests.integration.helpers import make_orchestrator, make_user, turn_for
 
 pytestmark = pytest.mark.integration
 
 
+BOT = FakeBot()
+
+
 @pytest.fixture
 def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Перехватываем Message.answer, чтобы не ходить в Telegram."""
-    replies: list[dict[str, Any]] = []
+    """Перехватываем отправку, чтобы не ходить в Telegram: и Message.answer, и bot.send_*."""
+    BOT.sent = []
 
     async def fake_answer(self: Message, text: str, **kwargs: Any) -> None:
-        replies.append({"text": text, **kwargs})
+        BOT.sent.append({"text": text, **kwargs})
 
     monkeypatch.setattr(Message, "answer", fake_answer)
-    return replies
+    return BOT.sent
 
 
 def fsm() -> FSMContext:
@@ -49,7 +53,7 @@ def message(text: str, telegram_id: int = 1, entities: list[MessageEntity] | Non
         from_user=TgUser(id=telegram_id, is_bot=False, first_name="Анна"),
         text=text,
         entities=entities,
-    )
+    ).as_(BOT)  # type: ignore[arg-type]
 
 
 async def test_start_greets_new_and_returning_user(

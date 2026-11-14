@@ -38,3 +38,9 @@ def test_uuid7_rejects_out_of_range_timestamp() -> None:
 def test_timestamp_requires_v7() -> None:
     with pytest.raises(ValueError):
         uuid7_timestamp_ms(uuid.uuid4())
+
+
+def test_uuid7_is_monotonic_within_one_millisecond() -> None:
+    ids = [uuid7() for _ in range(5000)]
+    assert ids == sorted(ids)
+    assert len(set(ids)) == len(ids)

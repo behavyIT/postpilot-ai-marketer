@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -51,4 +53,4 @@ async def menu_command(
 ) -> None:
     await state.clear()
     reply = await orchestrator.handle_command(turn, COMMAND_INTENTS[command.command], message.text or "")
-    await send_reply(message, reply, state)
+    await send_reply(message, reply, state, on_sent=partial(orchestrator.presented, turn))

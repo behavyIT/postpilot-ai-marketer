@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.orchestrator import messages as msg
 from app.agents.orchestrator.content_view import plan_reply, strategy_reply
 from app.agents.orchestrator.intents import CONFIDENCE_THRESHOLD, Intent, IntentClassifier, IntentResult
+from app.agents.orchestrator.post_view import CHANNEL_HOWTO
+from app.agents.orchestrator.posts import POST_TARGETED, PostFlows, reply_is_post_edit
 from app.agents.orchestrator.profile_view import profile_reply
 from app.agents.orchestrator.replies import Action, Button, Expect, Reply
 from app.ai.llm.base import LLMError, LLMMessage
@@ -23,10 +25,12 @@ from app.core.errors import AppError, NotFoundError
 from app.core.logging import get_logger
 from app.db.models import Project, User
 from app.domain.enums import DocumentType, MessageRole, ProjectStatus
+from app.domain.publications.refs import PostRef
 from app.integrations.storage.base import FileStorage
 from app.schemas.business_profile import BusinessProfileData
 from app.schemas.content import StrategyData
 from app.services.access import AccessService
+from app.services.channels import ChannelService
 from app.services.content_repo import ContentRepository
 from app.services.conversation import ConversationService
 from app.services.jobs import ContentJob, ContentJobKind, JobQueue, ProfileAnalysisJob
@@ -42,10 +46,6 @@ MIN_NOTE_LENGTH_WITH_URL = 30
 HISTORY_LIMIT = 6
 
 _COMING_SOON = {
-    Intent.EDIT_POST,
-    Intent.GENERATE_IMAGE,
-    Intent.SCHEDULE_POST,
-    Intent.CANCEL_POST,
     Intent.ANALYTICS,
     Intent.FIND_TOPICS,
 }
@@ -68,6 +68,7 @@ _CONTENT_ACTIONS = {
     Action.PLAN_SHOW,
     Action.MEMORY_FORGET,
 }
+_POST_ACTIONS = {a for a in Action if a.value.startswith(("post.", "channel."))}
 
 
 @dataclass(slots=True)
@@ -97,15 +98,25 @@ class Orchestrator:
         self._conversation = ConversationService(session)
         self._content = ContentRepository(session)
         self._memory = MemoryService(session)
+        self._channels = ChannelService(session)
+        self._posts = PostFlows(session, jobs=jobs, storage=storage)
         self._classifier = IntentClassifier(llm)
 
     # --- Точки входа --------------------------------------------------------------------------
 
-    async def handle_text(self, turn: Turn, text: str, *, urls: list[str] | None = None) -> Reply:
+    async def handle_text(
+        self,
+        turn: Turn,
+        text: str,
+        *,
+        urls: list[str] | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> Reply:
         history = await self._history(turn)
         await self._remember(turn, MessageRole.USER, text)
         try:
-            if urls:
+            replied_post = await self._replied_post(turn, reply_to_message_id)
+            if urls and replied_post is None:
                 reply = await self._add_websites(turn, text, urls)
             else:
                 result = await self._classifier.classify(
@@ -118,7 +129,22 @@ class Orchestrator:
                     ),
                 )
                 log.info("orchestrator.intent", intent=result.intent, confidence=result.confidence)
-                reply = await self._dispatch(turn, result, text)
+                if (
+                    replied_post is not None
+                    and turn.project is not None
+                    and reply_is_post_edit(result.intent)
+                ):
+                    # Ответ на сообщение с постом относится к этому посту.
+                    reply = await self._posts.on_intent(
+                        turn.user,
+                        turn.project,
+                        result,
+                        text,
+                        target=replied_post.variant_id,
+                        chat_id=turn.chat_id,
+                    )
+                else:
+                    reply = await self._dispatch(turn, result, text)
         except LLMError as exc:
             reply = Reply(text=str(exc), intent="error")
         except AppError as exc:
@@ -192,6 +218,10 @@ class Orchestrator:
                 return Reply(text=msg.PROFILE_REFRESHING, intent="profile_refresh")
             if action in _CONTENT_ACTIONS:
                 return await self._content_button(turn, action, value)
+            if action in _POST_ACTIONS:
+                if turn.project is None:
+                    return Reply(text=msg.NO_PROJECT, intent="error")
+                return await self._posts.button(turn.user, turn.project, action, value, chat_id=turn.chat_id)
             return Reply(text=msg.HELP, intent="help")
         except NotFoundError as exc:
             return Reply(text=f"{exc} — откройте список заново", intent="error")
@@ -200,6 +230,39 @@ class Orchestrator:
             return Reply(text="Кнопка устарела — откройте раздел заново через меню.", intent="error")
         except AppError as exc:
             return Reply(text=str(exc), intent="error")
+
+    async def handle_post_input(
+        self, turn: Turn, expect: Expect, data: dict[str, str], text: str, *, html: str | None = None
+    ) -> Reply:
+        """Ответ на вопрос бота про пост: «что изменить?» или «когда публикуем?»."""
+        await self._remember(turn, MessageRole.USER, text)
+        try:
+            if turn.project is None:
+                reply = Reply(text=msg.NO_PROJECT, intent="error")
+            else:
+                ref = PostRef.parse(data.get("ref", ""))
+                if expect is Expect.POST_TIME:
+                    reply = await self._posts.schedule_text(turn.user, turn.project, ref, text)
+                else:
+                    reply = await self._posts.edit(
+                        turn.user, turn.project, ref.variant_id, text, chat_id=turn.chat_id, html=html
+                    )
+        except ValueError:
+            reply = Reply(text="Не нашёл пост — откройте его заново через /schedule.", intent="error")
+        except AppError as exc:
+            reply = Reply(text=str(exc), intent="error")
+        await self._remember(turn, MessageRole.ASSISTANT, reply.text, intent=reply.intent)
+        return reply
+
+    async def presented(self, turn: Turn, reply: Reply, message_ids: list[int]) -> None:
+        """Бот отправил ответ; для превью постов запоминаем сообщения."""
+        if turn.chat_id is not None:
+            await self._posts.presented(turn.chat_id, reply, message_ids)
+
+    async def _replied_post(self, turn: Turn, message_id: int | None) -> PostRef | None:
+        if message_id is None or turn.chat_id is None or turn.project is None:
+            return None
+        return await self._posts.ref_for_message(turn.chat_id, message_id)
 
     async def create_project(self, turn: Turn, name: str) -> Reply:
         """Ответ на вопрос «Как назвать проект?»."""
@@ -254,7 +317,22 @@ class Orchestrator:
         if intent is Intent.CREATE_PLAN:
             return await self._create_plan(turn, result.period_days or 7, result.instructions)
         if intent is Intent.SHOW_SCHEDULE:
-            return await self._show_plan(turn)
+            if turn.project is None:
+                return Reply(text=msg.NO_PROJECT, intent=intent)
+            return await self._posts.overview(turn.project)
+        if intent is Intent.CONNECT_CHANNEL:
+            return Reply(text=CHANNEL_HOWTO, intent=intent)
+        if intent in POST_TARGETED:
+            if turn.project is None:
+                return Reply(text=msg.NO_PROJECT, intent=intent)
+            return await self._posts.on_intent(
+                turn.user,
+                turn.project,
+                result,
+                text,
+                target=await self._posts.focused(turn.chat_id, turn.project),
+                chat_id=turn.chat_id,
+            )
         if intent is Intent.CREATE_POST:
             return await self._create_post(turn, result.topic, result.instructions)
         if intent is Intent.HELP:
@@ -393,6 +471,13 @@ class Orchestrator:
             return Reply(text=msg.NO_PROJECT, intent=Intent.SETTINGS)
         project = turn.project
         preferences = await self._memory.preferences(project.id)
+        account = await self._channels.current(project.id)
+        if account is None:
+            channel_line = "Telegram-канал: не подключён — /schedule → «Как подключить канал»"
+        elif account.can_post:
+            channel_line = f"Telegram-канал: «{msg.q(account.title)}» ✅"
+        else:
+            channel_line = f"Telegram-канал: «{msg.q(account.title)}» — ⚠️ у бота нет права публиковать"
         remembered = (
             "\n\n<b>Что я запомнил о ваших пожеланиях</b>\n" + "\n".join(f"• {msg.q(p)}" for p in preferences)
             if preferences
@@ -404,7 +489,7 @@ class Orchestrator:
                 f"Состояние: {msg.STATUS_LABELS.get(project.status, project.status)}\n"
                 f"Часовой пояс: {msg.q(project.timezone)}\n"
                 "Режим: ассистент — публикую только то, что вы одобрили\n"
-                "Площадки: пока не подключены (Telegram-канал — в ближайших обновлениях)\n"
+                f"{channel_line}\n"
                 "Языковая модель: GigaChat" + remembered + f"\n\n{msg.PREFERENCE_HINT}"
             ),
             buttons=[[Button(text="🧹 Забыть пожелания", action=Action.MEMORY_FORGET)]]

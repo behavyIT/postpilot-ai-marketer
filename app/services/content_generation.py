@@ -1,4 +1,8 @@
-"""Генерация стратегии, контент-плана и текстов постов (выполняется в воркере)."""
+"""Генерация стратегии, контент-плана, текстов постов и картинок (выполняется в воркере).
+
+Модель работает вне транзакции: сначала читаем данные, потом долго ждём ответ,
+потом в новой транзакции проверяем, что пост за это время не изменился, и сохраняем версию.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +17,13 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.content_planner import ContentPlanner
-from app.agents.copywriter import Copywriter, NumberedFact, PostBrief
+from app.agents.copywriter import Copywriter, NumberedFact, PostBrief, WrittenPost, review_text
 from app.agents.strategist import Strategist
+from app.agents.visual import ImageBrief, VisualAgent, build_image_prompt
 from app.ai.llm.base import LLMError
 from app.ai.llm.service import CallContext, LLMService
 from app.core.errors import AppError
+from app.core.ids import uuid7
 from app.core.logging import get_logger
 from app.db.models import (
     ContentPlan,
@@ -26,23 +32,27 @@ from app.db.models import (
     Project,
     Publication,
     PublicationVariant,
-    PublicationVersion,
+    StoredFile,
 )
 from app.domain.enums import (
     ActorType,
     ContentGoal,
     DocumentStatus,
     FactStatus,
+    FileKind,
     Platform,
     ProfileField,
     PublicationStatus,
 )
 from app.domain.platforms import SPECS
+from app.domain.publications.refs import PostRef
+from app.integrations.storage.base import FileStorage
 from app.schemas.business_profile import BusinessProfileData
 from app.schemas.content import StrategyData
 from app.services.content_repo import ContentRepository
 from app.services.memory import MemoryService
 from app.services.profile_analysis import load_latest_profile
+from app.services.publications import PublicationService
 
 log = get_logger(__name__)
 
@@ -84,6 +94,13 @@ class DraftOutcome:
     text: str | None
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    ref: PostRef | None = None  # созданная версия: по ней строится превью с кнопками
+
+
+@dataclass(slots=True)
+class RevisionOutcome:
+    ref: PostRef | None
+    error: str | None = None
 
 
 class ContentGenerationService:
@@ -93,12 +110,15 @@ class ContentGenerationService:
         *,
         llm: LLMService,
         platforms: list[Platform],
+        storage: FileStorage | None = None,
     ) -> None:
         self._sf = session_factory
         self._platforms = platforms
+        self._storage = storage
         self._strategist = Strategist(llm)
         self._planner = ContentPlanner(llm)
         self._copywriter = Copywriter(llm)
+        self._visual = VisualAgent(llm)
 
     # --- Стратегия ----------------------------------------------------------------------------
 
@@ -281,6 +301,45 @@ class ContentGenerationService:
     async def _write(
         self, publication: Publication, user_id: UUID, *, instructions: str | None
     ) -> DraftOutcome:
+        try:
+            post = await self._compose(publication, user_id, instructions=instructions, current_text=None)
+        except LLMError as exc:
+            return DraftOutcome(publication=publication, text=None, error=str(exc))
+
+        async with self._sf() as session:
+            variant = PublicationVariant(
+                publication_id=publication.id,
+                platform=Platform.TELEGRAM,
+                status=PublicationStatus.DRAFT,
+                current_version_no=0,
+            )
+            session.add(variant)
+            await session.flush()
+            version = await PublicationService(session).add_version(
+                variant,
+                body=post.text,
+                hashtags=post.hashtags,
+                actor=ActorType.AI,
+                change_request=instructions,
+                used_fact_ids=post.used_fact_ids,
+                warnings=post.warnings,
+            )
+            await session.commit()
+        return DraftOutcome(
+            publication=publication,
+            text=post.text,
+            warnings=post.warnings,
+            ref=PostRef(variant.id, version.version_no),
+        )
+
+    async def _compose(
+        self,
+        publication: Publication,
+        user_id: UUID,
+        *,
+        instructions: str | None,
+        current_text: str | None,
+    ) -> _Composed:
         project_id = publication.project_id
         async with self._sf() as session:
             facts = list(
@@ -291,55 +350,190 @@ class ContentGenerationService:
         strategy = StrategyData.model_validate(strategy_row.data) if strategy_row else None
         selected = _select_facts(facts)
         numbered = {i: f for i, f in enumerate(selected, start=1)}
-        spec = SPECS[Platform.TELEGRAM]
+        post: WrittenPost = await self._copywriter.write(
+            PostBrief(
+                category=publication.category,
+                goal=publication.goal,
+                topic=publication.topic,
+                title=publication.title,
+                brief=publication.brief,
+                cta=publication.cta or "",
+                hashtags=list(publication.hashtags),
+                visual_idea=publication.visual_idea or "",
+            ),
+            spec=SPECS[Platform.TELEGRAM],
+            strategy=strategy,
+            facts=[NumberedFact(i, f.value) for i, f in numbered.items()],
+            reference_text=_reference_text(facts),
+            preferences=preferences,
+            instructions=instructions,
+            current_text=current_text,
+            ctx=CallContext(purpose="content.post", project_id=project_id, user_id=user_id),
+        )
+        return _Composed(
+            text=post.text,
+            hashtags=post.hashtags,
+            warnings=post.warnings,
+            used_fact_ids=[str(numbered[n].id) for n in post.used_fact_numbers],
+        )
 
+    # --- Правки и картинки --------------------------------------------------------------------
+
+    async def revise(
+        self, project_id: UUID, user_id: UUID, variant_id: UUID, *, instructions: str | None
+    ) -> RevisionOutcome:
+        """Новая редакция текста. Пост уже переведён в NEEDS_REVISION сценарием бота."""
+        async with self._sf() as session:
+            view = await PublicationService(session).get_view(project_id, variant_id)
+            if view.variant.status != PublicationStatus.NEEDS_REVISION:
+                return RevisionOutcome(ref=None, error="Пост уже изменён или отменён — правка не нужна")
+            base_version = view.version.version_no
+            publication, current_text, media = view.publication, view.version.body, view.media
         try:
-            post = await self._copywriter.write(
-                PostBrief(
-                    category=publication.category,
-                    goal=publication.goal,
-                    topic=publication.topic,
-                    title=publication.title,
-                    brief=publication.brief,
-                    cta=publication.cta or "",
-                    hashtags=list(publication.hashtags),
-                    visual_idea=publication.visual_idea or "",
-                ),
-                spec=spec,
-                strategy=strategy,
-                facts=[NumberedFact(i, f.value) for i, f in numbered.items()],
-                reference_text="\n".join(f"{f.value} {f.quote}" for f in facts),
-                preferences=preferences,
-                instructions=instructions,
-                ctx=CallContext(purpose="content.post", project_id=project_id, user_id=user_id),
+            post = await self._compose(
+                publication, user_id, instructions=instructions, current_text=current_text
             )
         except LLMError as exc:
-            return DraftOutcome(publication=publication, text=None, error=str(exc))
+            return RevisionOutcome(ref=PostRef(variant_id, base_version), error=str(exc))
+        return await self._save_revision(
+            project_id,
+            variant_id,
+            base_version,
+            body=post.text,
+            hashtags=post.hashtags,
+            warnings=post.warnings,
+            used_fact_ids=post.used_fact_ids,
+            change_request=instructions or "другой вариант",
+            media=media,
+            image_prompt=None,
+            keep_image_prompt=True,
+        )
 
+    async def draw_image(
+        self, project_id: UUID, user_id: UUID, variant_id: UUID, *, request: str | None
+    ) -> RevisionOutcome:
+        """Картинка к посту → новая версия с тем же текстом. Пост уже в NEEDS_REVISION."""
+        if self._storage is None:
+            raise AppError("Хранилище файлов не настроено")
+        if not self._visual.available:
+            return RevisionOutcome(ref=None, error="Подключённая модель не умеет рисовать картинки")
         async with self._sf() as session:
-            variant = PublicationVariant(
-                publication_id=publication.id,
-                platform=Platform.TELEGRAM,
-                status=PublicationStatus.DRAFT,
-                current_version_no=1,
+            view = await PublicationService(session).get_view(project_id, variant_id)
+            if view.variant.status != PublicationStatus.NEEDS_REVISION:
+                return RevisionOutcome(ref=None, error="Пост уже изменён или отменён — картинка не нужна")
+            base_version = view.version.version_no
+            version = view.version
+            profile = await load_latest_profile(session, project_id)
+            industry = None
+            if profile is not None:
+                fields = BusinessProfileData.model_validate(profile.data).fields
+                industry = fields[ProfileField.INDUSTRY].value if ProfileField.INDUSTRY in fields else None
+        prompt = build_image_prompt(
+            ImageBrief(
+                topic=view.publication.topic,
+                visual_idea=view.publication.visual_idea,
+                industry=industry,
+                request=request,
             )
-            session.add(variant)
-            await session.flush()
-            session.add(
-                PublicationVersion(
-                    variant_id=variant.id,
-                    version_no=1,
-                    body=post.text,
-                    hashtags=post.hashtags,
-                    content_hash=hashlib.sha256(post.text.encode()).hexdigest(),
-                    created_by_type=ActorType.AI,
-                    change_request=instructions,
-                    used_fact_ids=[str(numbered[n].id) for n in post.used_fact_numbers],
-                    warnings=post.warnings,
+        )
+        try:
+            image = await self._visual.draw(
+                prompt, ctx=CallContext(purpose="content.image", project_id=project_id, user_id=user_id)
+            )
+        except LLMError as exc:
+            return RevisionOutcome(ref=PostRef(variant_id, base_version), error=str(exc))
+
+        file_id = uuid7()
+        extension = {"image/png": "png", "image/webp": "webp"}.get(image.mime_type, "jpg")
+        key = f"projects/{project_id}/generated/{file_id}.{extension}"
+        await self._storage.save(key, image.data)
+        async with self._sf() as session:
+            stored = StoredFile(
+                id=file_id,
+                project_id=project_id,
+                kind=FileKind.GENERATED_IMAGE,
+                storage_backend=self._storage.backend,
+                storage_key=key,
+                mime_type=image.mime_type,
+                size_bytes=len(image.data),
+                sha256=hashlib.sha256(image.data).hexdigest(),
+                original_name=f"image.{extension}",
+            )
+            session.add(stored)
+            await session.commit()
+        return await self._save_revision(
+            project_id,
+            variant_id,
+            base_version,
+            body=version.body,
+            hashtags=list(version.hashtags),
+            warnings=list(version.warnings),
+            used_fact_ids=list(version.used_fact_ids),
+            change_request=f"картинка: {request}" if request else "картинка",
+            media=stored,
+            image_prompt=prompt,
+            keep_image_prompt=False,
+        )
+
+    async def _save_revision(
+        self,
+        project_id: UUID,
+        variant_id: UUID,
+        base_version: int,
+        *,
+        body: str,
+        hashtags: list[str],
+        warnings: list[str],
+        used_fact_ids: list[str],
+        change_request: str,
+        media: StoredFile | None,
+        image_prompt: str | None,
+        keep_image_prompt: bool,
+    ) -> RevisionOutcome:
+        async with self._sf() as session:
+            service = PublicationService(session)
+            view = await service.get_view(project_id, variant_id, lock=True)
+            # Пока модель работала, владелец мог отменить пост или прислать другую правку.
+            if (
+                view.variant.status != PublicationStatus.NEEDS_REVISION
+                or view.version.version_no != base_version
+            ):
+                return RevisionOutcome(
+                    ref=None, error="Пост изменился, пока я работал, — эту правку не сохраняю"
                 )
+            if media is not None:
+                media = await session.get(StoredFile, media.id)
+            version = await service.add_version(
+                view.variant,
+                body=body,
+                hashtags=hashtags,
+                actor=ActorType.AI,
+                change_request=change_request,
+                used_fact_ids=used_fact_ids,
+                warnings=warnings,
+                media=media,
+                image_prompt=view.version.image_prompt if keep_image_prompt else image_prompt,
             )
             await session.commit()
-        return DraftOutcome(publication=publication, text=post.text, warnings=post.warnings)
+        return RevisionOutcome(ref=PostRef(variant_id, version.version_no))
+
+
+async def review_post_text(session: AsyncSession, project_id: UUID, body: str) -> list[str]:
+    """Предупреждения для текста, который владелец написал сам: те же проверки, что у AI-текста."""
+    facts = list(await session.scalars(select(ProfileFact).where(ProfileFact.project_id == project_id)))
+    return review_text(body, SPECS[Platform.TELEGRAM], _reference_text(facts))
+
+
+@dataclass(slots=True)
+class _Composed:
+    text: str
+    hashtags: list[str]
+    warnings: list[str]
+    used_fact_ids: list[str]
+
+
+def _reference_text(facts: list[ProfileFact]) -> str:
+    return "\n".join(f"{f.value} {f.quote}" for f in facts)
 
 
 async def _require_profile(session: AsyncSession, project_id: UUID) -> BusinessProfileData:

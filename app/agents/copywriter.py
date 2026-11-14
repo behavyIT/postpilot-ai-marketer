@@ -63,8 +63,14 @@ class Copywriter:
         instructions: str | None,
         ctx: CallContext,
         reference_text: str | None = None,
+        current_text: str | None = None,
     ) -> WrittenPost:
-        """reference_text — все проверенные сведения о бизнесе для проверки цифр (шире, чем facts)."""
+        """Новый пост по пункту плана или новая редакция существующего.
+
+        current_text — текущая редакция: с instructions это правка («сократи, добавь юмора»),
+        без них — другой вариант на ту же тему. reference_text — все проверенные сведения
+        о бизнесе для проверки цифр (шире, чем facts).
+        """
         task = (
             f"Рубрика: {brief.category}. Цель: {brief.goal}.\nТема: {brief.topic}\nЗаголовок: {brief.title}\n"
             f"О чём пост: {brief.brief}\nПризыв к действию: {brief.cta}\n"
@@ -81,7 +87,18 @@ class Copywriter:
                 f"Тон бренда: {strategy.tone_of_voice}\nПравила контента:\n"
                 + "\n".join(f"- {r}" for r in strategy.content_rules)
             )
-        if instructions:
+        if current_text is not None and instructions:
+            parts.append(
+                f"Текущая редакция поста:\n{current_text[:4000]}\n\n"
+                f"Владелец просит изменить её так: {instructions}\n"
+                "Перепиши пост с учётом этой просьбы. Остальное сохрани, если просьба этого не касается."
+            )
+        elif current_text is not None:
+            parts.append(
+                f"Прежний вариант поста владельцу не подошёл:\n{current_text[:4000]}\n\n"
+                "Напиши новый вариант на ту же тему: другой заход, другие формулировки."
+            )
+        elif instructions:
             parts.append(f"Что владелец просит учесть: {instructions}")
         messages = [
             LLMMessage(role="system", content=load_prompt("copywriter")),
@@ -113,14 +130,17 @@ class Copywriter:
         hashtags = normalize_hashtags(draft.hashtags or brief.hashtags, limit=spec.max_hashtags)
         text = body + (f"\n\n{' '.join(hashtags)}" if hashtags else "")
         known = {f.number for f in facts}
-        warnings = validate_for_platform(text, spec, with_image=True)
-        warnings += check_claims(text, reference_text or "\n".join(f.text for f in facts))
         return WrittenPost(
             text=text,
             hashtags=hashtags,
             used_fact_numbers=[n for n in dict.fromkeys(draft.used_fact_ids) if n in known],
-            warnings=warnings,
+            warnings=review_text(text, spec, reference_text or "\n".join(f.text for f in facts)),
         )
+
+
+def review_text(text: str, spec: PlatformSpec, facts_text: str) -> list[str]:
+    """Предупреждения для владельца: ограничения площадки и рискованные утверждения."""
+    return validate_for_platform(text, spec, with_image=True) + check_claims(text, facts_text)
 
 
 _HASHTAG_LINE = re.compile(r"(?m)^\s*(#[\w]+\s*)+$")

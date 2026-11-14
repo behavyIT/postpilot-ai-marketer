@@ -132,6 +132,28 @@ class PublicationStatus(StrEnum):
     FAILED = "failed"
 
 
+class ApprovalDecision(StrEnum):
+    """Решение владельца по конкретной версии поста. Записи неизменяемы."""
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REVISION_REQUESTED = "revision_requested"
+
+
+class PublishAttemptStatus(StrEnum):
+    STARTED = "started"  # запрос к площадке отправляется или отправлен
+    SUCCEEDED = "succeeded"
+    FAILED_RETRYABLE = "failed_retryable"  # точно не опубликовано, можно повторить
+    FAILED_PERMANENT = "failed_permanent"  # площадка отказала, повтор не поможет
+    UNKNOWN = "unknown"  # ответа нет: пост мог выйти — автоматически не повторяем
+
+
+class SocialAccountStatus(StrEnum):
+    ACTIVE = "active"
+    NO_RIGHTS = "no_rights"  # бот в канале, но без права публиковать
+    DISCONNECTED = "disconnected"
+
+
 class ContentGoal(StrEnum):
     AWARENESS = "awareness"  # узнаваемость
     ENGAGEMENT = "engagement"  # вовлечение

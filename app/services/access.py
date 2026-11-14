@@ -85,6 +85,10 @@ class AccessService:
             await self._session.flush()
         return user, created
 
+    async def find_user(self, telegram_user_id: int) -> User | None:
+        """Пользователь, который уже писал боту (без регистрации нового)."""
+        return await self._session.scalar(select(User).where(User.telegram_user_id == telegram_user_id))
+
     async def accept_consent(self, user: User) -> None:
         """Зафиксировать согласие на обработку данных (один раз)."""
         if user.consent_at is not None:

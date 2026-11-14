@@ -25,16 +25,24 @@ uv run alembic upgrade head # схема базы
 uv run python -m app.bot                                              # Telegram-бот (polling)
 uv run uvicorn app.main:create_app --factory --port 8000              # API: /health, /ready
 uv run taskiq worker app.workers.broker:broker app.workers.tasks      # фоновые задачи
+uv run python -m app.scheduler                                        # диспетчер расписания публикаций
 ```
 
 Или всё в контейнерах: `docker compose --profile app up -d --build`.
+
+## Подключение Telegram-канала
+
+1. В канале: Управление каналом → Администраторы → добавьте бота и включите право «Публикация сообщений».
+2. Боту: перешлите любой пост из канала или пришлите его адрес (`@my_channel`).
+
+Подключить канал может только его администратор. Публикуются только посты, одобренные кнопкой «✅ Одобрить» под конкретной версией; любая правка требует нового одобрения.
 
 ## Проверки
 
 ```bash
 uv run pytest            # тесты (нужны контейнеры postgres и redis)
 uv run ruff check .      # линтер
-uv run mypy app          # типы
+uv run mypy app tests    # типы
 uv run python scripts/spike_gigachat.py   # проверка ключа GigaChat и возможностей API
 uv run python scripts/eval_intents.py     # точность распознавания намерений на живой модели
 ```

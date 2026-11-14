@@ -25,6 +25,8 @@ class ContentJobKind(StrEnum):
     PLAN = "plan"
     PLAN_POSTS = "plan_posts"
     SINGLE_POST = "single_post"
+    REVISE = "revise"  # новая редакция текста поста (instructions — что изменить; пусто — другой вариант)
+    IMAGE = "image"  # картинка к посту (topic — пожелание к сюжету)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,9 +39,18 @@ class ContentJob:
     instructions: str | None = None
     plan_id: UUID | None = None
     topic: str | None = None
+    variant_id: UUID | None = None
 
 
-Job = ProfileAnalysisJob | ContentJob
+@dataclass(frozen=True, slots=True)
+class PublishJob:
+    """Опубликовать вариант, если все проверки пройдут (решает воркер, а не тот, кто ставит задачу)."""
+
+    variant_id: UUID
+    version_no: int
+
+
+Job = ProfileAnalysisJob | ContentJob | PublishJob
 
 
 class JobQueue(Protocol):
@@ -62,6 +73,10 @@ class MemoryJobQueue:
     @property
     def content_jobs(self) -> list[ContentJob]:
         return [j for j in self.jobs if isinstance(j, ContentJob)]
+
+    @property
+    def publish_jobs(self) -> list[PublishJob]:
+        return [j for j in self.jobs if isinstance(j, PublishJob)]
 
 
 class DeferredJobQueue:

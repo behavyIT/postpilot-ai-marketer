@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -9,7 +11,7 @@ from aiogram.types import CallbackQuery, Message
 from app.agents.orchestrator.orchestrator import Orchestrator, Turn
 from app.agents.orchestrator.replies import Action
 from app.bot.keyboards import ActionCallback
-from app.bot.render import send_reply
+from app.bot.render import close_buttons, send_reply
 
 router = Router(name="callbacks")
 
@@ -30,4 +32,6 @@ async def on_action(
     reply = await orchestrator.handle_button(turn, action, callback_data.value)
     await callback.answer()
     if isinstance(callback.message, Message):
-        await send_reply(callback.message, reply, state)
+        if reply.close_source:
+            await close_buttons(callback.message)
+        await send_reply(callback.message, reply, state, on_sent=partial(orchestrator.presented, turn))

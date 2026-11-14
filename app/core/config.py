@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     crawl_delay_s: float = 0.3
     # Пауза перед анализом: источники, присланные подряд, обрабатываются одним запуском.
     profile_batch_delay_s: float = 8.0
+    scheduler_interval_s: int = 20  # как часто диспетчер проверяет расписание публикаций
 
     # Очередь к модели: бесплатный тариф GigaChat — один запрос одновременно.
     llm_lock_ttl_s: float = 180.0

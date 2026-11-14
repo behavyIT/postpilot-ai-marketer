@@ -30,6 +30,7 @@ class Intent(StrEnum):
     ANALYTICS = "analytics"
     FIND_TOPICS = "find_topics"
     SETTINGS = "settings"
+    CONNECT_CHANNEL = "connect_channel"
     ADD_PREFERENCE = "add_preference"
     PAUSE = "pause"
     RESUME = "resume"

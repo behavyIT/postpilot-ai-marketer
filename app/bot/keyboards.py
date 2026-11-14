@@ -23,7 +23,9 @@ def build_keyboard(reply: Reply) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
+                InlineKeyboardButton(text=button.text[:MAX_BUTTON_TEXT], url=button.url)
+                if button.url
+                else InlineKeyboardButton(
                     text=button.text[:MAX_BUTTON_TEXT],
                     callback_data=ActionCallback(action=button.action.value, value=button.value).pack(),
                 )

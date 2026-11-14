@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
@@ -31,9 +33,17 @@ def extract_urls(message: Message) -> list[str]:
 async def on_text(
     message: Message, bot: Bot, state: FSMContext, turn: Turn, orchestrator: Orchestrator
 ) -> None:
+    replied = message.reply_to_message
+    reply_to = (
+        replied.message_id
+        if replied is not None and replied.from_user is not None and replied.from_user.id == bot.id
+        else None
+    )
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-        reply = await orchestrator.handle_text(turn, message.text or "", urls=extract_urls(message))
-    await send_reply(message, reply, state)
+        reply = await orchestrator.handle_text(
+            turn, message.text or "", urls=extract_urls(message), reply_to_message_id=reply_to
+        )
+    await send_reply(message, reply, state, on_sent=partial(orchestrator.presented, turn))
 
 
 @router.message()
