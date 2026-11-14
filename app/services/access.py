@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import DomainValidationError, NotFoundError
 from app.db.models import Project, ProjectMember, User
-from app.domain.enums import ActorType, ProjectRole
+from app.domain.enums import ActorType, ProjectRole, ProjectStatus
 from app.services.audit import AuditService
 
 PROJECT_NAME_MAX_LENGTH = 120
@@ -165,6 +165,32 @@ class AccessService:
         project = await self.get_project(user, project_id)
         user.active_project_id = project.id
         await self._session.flush()
+        return project
+
+    async def find_projects_by_name(self, user: User, query: str) -> list[Project]:
+        """Проекты пользователя, в названии которых есть query (без учёта регистра)."""
+        needle = query.casefold().strip()
+        if not needle:
+            return []
+        return [p for p in await self.list_projects(user) if needle in p.name.casefold()]
+
+    async def set_project_status(self, user: User, project_id: UUID, status: ProjectStatus) -> Project:
+        """Пауза или возобновление автоматической работы проекта."""
+        project = await self.get_project(user, project_id)
+        if project.status == status:
+            return project
+        previous = project.status
+        project.status = status
+        await self._session.flush()
+        await self._audit.record(
+            action="project.status_changed",
+            actor_type=ActorType.USER,
+            actor_id=user.id,
+            project_id=project.id,
+            entity_type="project",
+            entity_id=project.id,
+            data={"from": previous, "to": status},
+        )
         return project
 
 

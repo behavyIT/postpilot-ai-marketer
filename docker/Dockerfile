@@ -19,6 +19,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev \
     && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data/files \
     && chown -R appuser /app
 
 USER appuser

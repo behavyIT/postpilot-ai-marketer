@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     gigachat_model_fast: str = "GigaChat-2"
     gigachat_timeout_s: float = 120.0
 
+    # Очередь к модели: бесплатный тариф GigaChat — один запрос одновременно.
+    llm_lock_ttl_s: float = 180.0
+    llm_queue_wait_s: float = 120.0
+
+    # Файлы пользователей (в Docker — том /app/data).
+    files_dir: Path = BASE_DIR / "data" / "files"
+    max_upload_mb: int = 20  # облачный Bot API отдаёт боту файлы не больше 20 МБ
+
+    # Защита от злоупотреблений: сообщений боту в минуту от одного пользователя.
+    user_messages_per_minute: int = 20
+
     @field_validator("telegram_bot_token", "gigachat_auth_key", "telegram_proxy", mode="before")
     @classmethod
     def _empty_to_none(cls, value: Any) -> Any:

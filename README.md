@@ -36,6 +36,7 @@ uv run pytest            # тесты (нужны контейнеры postgres 
 uv run ruff check .      # линтер
 uv run mypy app          # типы
 uv run python scripts/spike_gigachat.py   # проверка ключа GigaChat и возможностей API
+uv run python scripts/eval_intents.py     # точность распознавания намерений на живой модели
 ```
 
 ## Сертификат Минцифры

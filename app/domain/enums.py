@@ -37,6 +37,39 @@ class ActorType(StrEnum):
     AI = "ai"
 
 
+class FileKind(StrEnum):
+    UPLOAD = "upload"
+    GENERATED_IMAGE = "generated_image"
+
+
+class DocumentType(StrEnum):
+    PDF = "pdf"
+    DOCX = "docx"
+    PPTX = "pptx"
+    TXT = "txt"
+    IMAGE = "image"
+
+
+class SourceStatus(StrEnum):
+    """Состояние обработки источника знаний (документа, сайта)."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    PROCESSED = "processed"
+    FAILED = "failed"
+
+
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class LLMCallStatus(StrEnum):
+    OK = "ok"
+    ERROR = "error"
+    INVALID_OUTPUT = "invalid_output"
+
+
 def check_values(enum_cls: type[StrEnum]) -> str:
     """SQL-список значений для CHECK-ограничения: 'a', 'b', 'c'."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)
