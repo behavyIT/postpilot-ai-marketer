@@ -8,8 +8,8 @@ async def test_deferred_queue_sends_only_on_flush_and_deduplicates() -> None:
     deferred = DeferredJobQueue(inner)
     job = ProfileAnalysisJob(project_id=uuid4(), user_id=uuid4(), chat_id=1)
 
-    await deferred.enqueue_profile_analysis(job)
-    await deferred.enqueue_profile_analysis(job)
+    await deferred.enqueue(job)
+    await deferred.enqueue(job)
     assert inner.profile_jobs == []
 
     await deferred.flush()
@@ -19,9 +19,7 @@ async def test_deferred_queue_sends_only_on_flush_and_deduplicates() -> None:
 async def test_discarded_jobs_are_never_sent() -> None:
     inner = MemoryJobQueue()
     deferred = DeferredJobQueue(inner)
-    await deferred.enqueue_profile_analysis(
-        ProfileAnalysisJob(project_id=uuid4(), user_id=uuid4(), chat_id=1)
-    )
+    await deferred.enqueue(ProfileAnalysisJob(project_id=uuid4(), user_id=uuid4(), chat_id=1))
     deferred.discard()
     await deferred.flush()
     assert inner.profile_jobs == []

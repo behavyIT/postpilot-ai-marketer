@@ -8,8 +8,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.redis import RedisStorage
-from aiogram.types import BotCommand, ErrorEvent
+from aiogram.types import BotCommand, ErrorEvent, User
 from redis.asyncio import Redis
 
 from app.ai.llm.factory import create_llm_service
@@ -55,6 +56,18 @@ async def on_error(event: ErrorEvent) -> bool:
     return True
 
 
+async def _connect(bot: Bot) -> User:
+    """Первое подключение к Telegram с повторами: короткий обрыв связи не должен останавливать бота."""
+    delay = 2.0
+    while True:
+        try:
+            return await bot.get_me()
+        except TelegramNetworkError as exc:
+            log.warning("bot.telegram_unreachable", retry_in_s=delay, error=str(exc)[:200])
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+
 async def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json=settings.log_json)
@@ -90,7 +103,7 @@ async def main() -> None:
 
     await broker.startup()  # бот ставит задачи в очередь воркера
     try:
-        me = await bot.get_me()
+        me = await _connect(bot)
         log.info("bot.started", username=me.username)
         await bot.set_my_commands(COMMANDS)
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

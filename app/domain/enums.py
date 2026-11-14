@@ -103,6 +103,48 @@ class FactStatus(StrEnum):
     MISSING = "missing"  # данных нет
 
 
+class DocumentStatus(StrEnum):
+    """Состояние стратегии и контент-плана."""
+
+    DRAFT = "draft"
+    APPROVED = "approved"
+    ARCHIVED = "archived"
+
+
+class Platform(StrEnum):
+    TELEGRAM = "telegram"
+    VK = "vk"
+    MAX = "max"
+
+
+class PublicationStatus(StrEnum):
+    """Жизненный цикл варианта публикации (§4.9 технического документа)."""
+
+    DRAFT = "draft"
+    PENDING_APPROVAL = "pending_approval"
+    NEEDS_REVISION = "needs_revision"
+    APPROVED = "approved"
+    SCHEDULED = "scheduled"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+class ContentGoal(StrEnum):
+    AWARENESS = "awareness"  # узнаваемость
+    ENGAGEMENT = "engagement"  # вовлечение
+    SALES = "sales"  # продажи
+    LOYALTY = "loyalty"  # лояльность
+    EDUCATION = "education"  # польза и обучение
+
+
+class MemoryKind(StrEnum):
+    PREFERENCE = "preference"  # пожелание владельца, действующее и дальше
+    REJECTION = "rejection"  # что владелец отклонил и почему
+
+
 def check_values(enum_cls: type[StrEnum]) -> str:
     """SQL-список значений для CHECK-ограничения: 'a', 'b', 'c'."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)

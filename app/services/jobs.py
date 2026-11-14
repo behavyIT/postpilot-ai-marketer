@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 
@@ -19,18 +20,48 @@ class ProfileAnalysisJob:
     force: bool = False
 
 
+class ContentJobKind(StrEnum):
+    STRATEGY = "strategy"
+    PLAN = "plan"
+    PLAN_POSTS = "plan_posts"
+    SINGLE_POST = "single_post"
+
+
+@dataclass(frozen=True, slots=True)
+class ContentJob:
+    kind: ContentJobKind
+    project_id: UUID
+    user_id: UUID
+    chat_id: int | None
+    days: int | None = None
+    instructions: str | None = None
+    plan_id: UUID | None = None
+    topic: str | None = None
+
+
+Job = ProfileAnalysisJob | ContentJob
+
+
 class JobQueue(Protocol):
-    async def enqueue_profile_analysis(self, job: ProfileAnalysisJob) -> None: ...
+    async def enqueue(self, job: Job) -> None: ...
 
 
 class MemoryJobQueue:
     """Для тестов: запоминает поставленные задачи."""
 
     def __init__(self) -> None:
-        self.profile_jobs: list[ProfileAnalysisJob] = []
+        self.jobs: list[Job] = []
 
-    async def enqueue_profile_analysis(self, job: ProfileAnalysisJob) -> None:
-        self.profile_jobs.append(job)
+    async def enqueue(self, job: Job) -> None:
+        self.jobs.append(job)
+
+    @property
+    def profile_jobs(self) -> list[ProfileAnalysisJob]:
+        return [j for j in self.jobs if isinstance(j, ProfileAnalysisJob)]
+
+    @property
+    def content_jobs(self) -> list[ContentJob]:
+        return [j for j in self.jobs if isinstance(j, ContentJob)]
 
 
 class DeferredJobQueue:
@@ -38,16 +69,16 @@ class DeferredJobQueue:
 
     def __init__(self, inner: JobQueue) -> None:
         self._inner = inner
-        self._pending: list[ProfileAnalysisJob] = []
+        self._pending: list[Job] = []
 
-    async def enqueue_profile_analysis(self, job: ProfileAnalysisJob) -> None:
+    async def enqueue(self, job: Job) -> None:
         if job not in self._pending:
             self._pending.append(job)
 
     async def flush(self) -> None:
         pending, self._pending = self._pending, []
         for job in pending:
-            await self._inner.enqueue_profile_analysis(job)
+            await self._inner.enqueue(job)
 
     def discard(self) -> None:
         self._pending.clear()

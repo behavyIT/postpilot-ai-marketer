@@ -24,6 +24,14 @@ class Action(StrEnum):
     PROJECT_LIST = "project.list"
     PROFILE_REFRESH = "profile.refresh"
     PROFILE_SHOW = "profile.show"
+    STRATEGY_APPROVE = "strategy.approve"
+    STRATEGY_REDO = "strategy.redo"
+    PLAN_CREATE = "plan.create"
+    PLAN_APPROVE = "plan.approve"
+    PLAN_REDO = "plan.redo"
+    PLAN_WRITE = "plan.write"
+    PLAN_SHOW = "plan.show"
+    MEMORY_FORGET = "memory.forget"
     HELP = "help"
 
 

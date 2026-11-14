@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import messages as msg
+from app.agents.orchestrator.content_view import plan_reply, strategy_reply
 from app.agents.orchestrator.intents import CONFIDENCE_THRESHOLD, Intent, IntentClassifier, IntentResult
 from app.agents.orchestrator.profile_view import profile_reply
 from app.agents.orchestrator.replies import Action, Button, Expect, Reply
@@ -24,9 +25,12 @@ from app.db.models import Project, User
 from app.domain.enums import DocumentType, MessageRole, ProjectStatus
 from app.integrations.storage.base import FileStorage
 from app.schemas.business_profile import BusinessProfileData
+from app.schemas.content import StrategyData
 from app.services.access import AccessService
+from app.services.content_repo import ContentRepository
 from app.services.conversation import ConversationService
-from app.services.jobs import JobQueue, ProfileAnalysisJob
+from app.services.jobs import ContentJob, ContentJobKind, JobQueue, ProfileAnalysisJob
+from app.services.memory import MemoryService
 from app.services.profile_analysis import load_latest_profile
 from app.services.sources import SourceService
 
@@ -38,13 +42,9 @@ MIN_NOTE_LENGTH_WITH_URL = 30
 HISTORY_LIMIT = 6
 
 _COMING_SOON = {
-    Intent.CREATE_STRATEGY,
-    Intent.CREATE_PLAN,
-    Intent.CREATE_POST,
     Intent.EDIT_POST,
     Intent.GENERATE_IMAGE,
     Intent.SCHEDULE_POST,
-    Intent.SHOW_SCHEDULE,
     Intent.CANCEL_POST,
     Intent.ANALYTICS,
     Intent.FIND_TOPICS,
@@ -55,6 +55,18 @@ _DOC_LABELS = {
     DocumentType.PPTX: "PPTX",
     DocumentType.TXT: "текст",
     DocumentType.IMAGE: "изображение",
+}
+
+
+_CONTENT_ACTIONS = {
+    Action.STRATEGY_APPROVE,
+    Action.STRATEGY_REDO,
+    Action.PLAN_CREATE,
+    Action.PLAN_APPROVE,
+    Action.PLAN_REDO,
+    Action.PLAN_WRITE,
+    Action.PLAN_SHOW,
+    Action.MEMORY_FORGET,
 }
 
 
@@ -83,6 +95,8 @@ class Orchestrator:
         self._access = AccessService(session, default_timezone=settings.default_timezone)
         self._sources = SourceService(session, storage, max_upload_bytes=settings.max_upload_mb * 1024 * 1024)
         self._conversation = ConversationService(session)
+        self._content = ContentRepository(session)
+        self._memory = MemoryService(session)
         self._classifier = IntentClassifier(llm)
 
     # --- Точки входа --------------------------------------------------------------------------
@@ -176,9 +190,16 @@ class Orchestrator:
                     return Reply(text=msg.NO_PROJECT, intent="error")
                 await self._schedule_analysis(turn, turn.project, force=True)
                 return Reply(text=msg.PROFILE_REFRESHING, intent="profile_refresh")
+            if action in _CONTENT_ACTIONS:
+                return await self._content_button(turn, action, value)
             return Reply(text=msg.HELP, intent="help")
-        except (ValueError, NotFoundError):
-            return Reply(text="Проект не найден — откройте список заново: /project", intent="error")
+        except NotFoundError as exc:
+            return Reply(text=f"{exc} — откройте список заново", intent="error")
+        except ValueError:
+            # Испорченные или устаревшие данные кнопки: технические подробности пользователю не нужны.
+            return Reply(text="Кнопка устарела — откройте раздел заново через меню.", intent="error")
+        except AppError as exc:
+            return Reply(text=str(exc), intent="error")
 
     async def create_project(self, turn: Turn, name: str) -> Reply:
         """Ответ на вопрос «Как назвать проект?»."""
@@ -225,7 +246,17 @@ class Orchestrator:
         if intent in {Intent.PAUSE, Intent.RESUME}:
             return await self._set_paused(turn, paused=intent is Intent.PAUSE)
         if intent is Intent.SETTINGS:
-            return self._settings(turn)
+            return await self._settings(turn)
+        if intent is Intent.ADD_PREFERENCE:
+            return await self._add_preference(turn, result.instructions or text)
+        if intent is Intent.CREATE_STRATEGY:
+            return await self._strategy(turn, result.instructions, from_command=text.startswith("/"))
+        if intent is Intent.CREATE_PLAN:
+            return await self._create_plan(turn, result.period_days or 7, result.instructions)
+        if intent is Intent.SHOW_SCHEDULE:
+            return await self._show_plan(turn)
+        if intent is Intent.CREATE_POST:
+            return await self._create_post(turn, result.topic, result.instructions)
         if intent is Intent.HELP:
             return Reply(text=msg.HELP, intent=intent)
         if intent is Intent.SMALLTALK:
@@ -357,10 +388,16 @@ class Orchestrator:
             text=f"Автоматическая работа проекта «{msg.q(project.name)}» возобновлена.", intent=Intent.RESUME
         )
 
-    def _settings(self, turn: Turn) -> Reply:
+    async def _settings(self, turn: Turn) -> Reply:
         if turn.project is None:
             return Reply(text=msg.NO_PROJECT, intent=Intent.SETTINGS)
         project = turn.project
+        preferences = await self._memory.preferences(project.id)
+        remembered = (
+            "\n\n<b>Что я запомнил о ваших пожеланиях</b>\n" + "\n".join(f"• {msg.q(p)}" for p in preferences)
+            if preferences
+            else ""
+        )
         return Reply(
             text=(
                 f"<b>Настройки проекта «{msg.q(project.name)}»</b>\n\n"
@@ -368,16 +405,179 @@ class Orchestrator:
                 f"Часовой пояс: {msg.q(project.timezone)}\n"
                 "Режим: ассистент — публикую только то, что вы одобрили\n"
                 "Площадки: пока не подключены (Telegram-канал — в ближайших обновлениях)\n"
-                "Языковая модель: GigaChat"
+                "Языковая модель: GigaChat" + remembered + f"\n\n{msg.PREFERENCE_HINT}"
             ),
+            buttons=[[Button(text="🧹 Забыть пожелания", action=Action.MEMORY_FORGET)]]
+            if preferences
+            else [],
             intent=Intent.SETTINGS,
+        )
+
+    # --- Стратегия, план, посты -----------------------------------------------------------------
+
+    async def _add_preference(self, turn: Turn, wish: str) -> Reply:
+        if turn.project is None:
+            return Reply(text=msg.NO_PROJECT, intent=Intent.ADD_PREFERENCE)
+        saved = await self._memory.add_preference(turn.project.id, wish, source="chat")
+        buttons = []
+        if await self._content.latest_strategy(turn.project.id) is not None:
+            buttons.append([Button(text="🔄 Обновить стратегию", action=Action.STRATEGY_REDO)])
+        return Reply(
+            text=msg.preference_saved(" ".join(wish.split())[:500], duplicate=not saved),
+            buttons=buttons,
+            intent=Intent.ADD_PREFERENCE,
+        )
+
+    async def _require_profile(self, turn: Turn) -> Reply | None:
+        """Ответ-заглушка, если профиля ещё нет; None — можно продолжать."""
+        if turn.project is None:
+            return Reply(text=msg.NEED_PROFILE, intent="need_profile")
+        if await load_latest_profile(self._session, turn.project.id) is not None:
+            return None
+        summary = await self._sources.summary(turn.project.id)
+        if summary.total:
+            await self._schedule_analysis(turn, turn.project)
+            return Reply(text=msg.PROFILE_FIRST, intent="need_profile")
+        return Reply(text=msg.NEED_PROFILE, intent="need_profile")
+
+    async def _strategy(self, turn: Turn, instructions: str | None, *, from_command: bool) -> Reply:
+        blocked = await self._require_profile(turn)
+        if blocked is not None or turn.project is None:
+            return blocked or Reply(text=msg.NEED_PROFILE)
+        existing = await self._content.latest_strategy(turn.project.id)
+        if existing is not None and not instructions and from_command:
+            return strategy_reply(
+                turn.project.name,
+                StrategyData.model_validate(existing.data),
+                strategy_id=str(existing.id),
+                version=existing.version_no,
+                status=existing.status,
+            )
+        await self._enqueue_content(turn, ContentJobKind.STRATEGY, instructions=instructions)
+        return Reply(text=msg.STRATEGY_STARTED, intent=Intent.CREATE_STRATEGY)
+
+    async def _create_plan(self, turn: Turn, days: int, instructions: str | None) -> Reply:
+        blocked = await self._require_profile(turn)
+        if blocked is not None:
+            return blocked
+        await self._enqueue_content(turn, ContentJobKind.PLAN, days=days, instructions=instructions)
+        return Reply(text=msg.plan_started(days), intent=Intent.CREATE_PLAN)
+
+    async def _show_plan(self, turn: Turn) -> Reply:
+        if turn.project is None:
+            return Reply(text=msg.NO_PROJECT, intent=Intent.SHOW_SCHEDULE)
+        view = await self._content.latest_plan(turn.project.id)
+        if view is None:
+            return Reply(
+                text=msg.NO_PLAN,
+                buttons=[[Button(text="📅 Составить план на неделю", action=Action.PLAN_CREATE)]],
+                intent=Intent.SHOW_SCHEDULE,
+            )
+        return plan_reply(
+            turn.project.name,
+            view.plan,
+            view.items,
+            timezone=turn.project.timezone,
+            written=set(view.written),
+        )
+
+    async def _create_post(self, turn: Turn, topic: str | None, instructions: str | None) -> Reply:
+        blocked = await self._require_profile(turn)
+        if blocked is not None or turn.project is None:
+            return blocked or Reply(text=msg.NEED_PROFILE)
+        if topic:
+            await self._enqueue_content(
+                turn, ContentJobKind.SINGLE_POST, topic=topic, instructions=instructions
+            )
+            return Reply(text=msg.POST_STARTED, intent=Intent.CREATE_POST)
+        view = await self._content.latest_plan(turn.project.id)
+        if view is not None and len(view.written) < len(view.items):
+            return Reply(
+                text=msg.ASK_POST_TOPIC + "\n\nИли напишу тексты для постов из контент-плана.",
+                buttons=[
+                    [
+                        Button(
+                            text="✍️ Написать тексты по плану",
+                            action=Action.PLAN_WRITE,
+                            value=str(view.plan.id),
+                        )
+                    ]
+                ],
+                intent=Intent.CREATE_POST,
+            )
+        return Reply(text=msg.ASK_POST_TOPIC, intent=Intent.CREATE_POST)
+
+    async def _content_button(self, turn: Turn, action: Action, value: str) -> Reply:
+        if turn.project is None:
+            return Reply(text=msg.NO_PROJECT, intent="error")
+        project = turn.project
+        if action is Action.STRATEGY_APPROVE:
+            strategy = await self._content.approve_strategy(turn.user, project.id, UUID(value))
+            return Reply(
+                text=f"Стратегия утверждена (вариант {strategy.version_no}). Составить по ней контент-план?",
+                buttons=[[Button(text="📅 Составить контент-план", action=Action.PLAN_CREATE)]],
+                intent="strategy_approved",
+            )
+        if action is Action.STRATEGY_REDO:
+            return await self._strategy(turn, None, from_command=False)
+        if action is Action.PLAN_CREATE:
+            return await self._create_plan(turn, 7, None)
+        if action is Action.PLAN_SHOW:
+            return await self._show_plan(turn)
+        if action is Action.MEMORY_FORGET:
+            await self._memory.forget_all(project.id)
+            return Reply(text=msg.MEMORY_FORGOTTEN, intent="memory_forget")
+        plan = await self._content.get_plan(project.id, UUID(value))
+        if action is Action.PLAN_APPROVE:
+            await self._content.approve_plan(turn.user, project.id, plan.id)
+            view = await self._content.plan_view(plan)
+            return Reply(
+                text=f"План утверждён: публикаций — {len(view.items)}. Написать тексты?",
+                buttons=[[Button(text="✍️ Написать тексты", action=Action.PLAN_WRITE, value=str(plan.id))]],
+                intent="plan_approved",
+            )
+        if action is Action.PLAN_REDO:
+            days = (plan.period_end - plan.period_start).days + 1
+            return await self._create_plan(turn, days, None)
+        if action is Action.PLAN_WRITE:
+            view = await self._content.plan_view(plan)
+            remaining = len(view.items) - len(view.written)
+            if remaining == 0:
+                return Reply(text="У всех постов этого плана уже есть тексты.", intent="plan_write")
+            await self._enqueue_content(turn, ContentJobKind.PLAN_POSTS, plan_id=plan.id)
+            return Reply(text=msg.POSTS_STARTED.format(count=remaining), intent="plan_write")
+        return Reply(text=msg.HELP, intent="help")
+
+    async def _enqueue_content(
+        self,
+        turn: Turn,
+        kind: ContentJobKind,
+        *,
+        days: int | None = None,
+        instructions: str | None = None,
+        plan_id: UUID | None = None,
+        topic: str | None = None,
+    ) -> None:
+        if turn.project is None:
+            return
+        await self._jobs.enqueue(
+            ContentJob(
+                kind=kind,
+                project_id=turn.project.id,
+                user_id=turn.user.id,
+                chat_id=turn.chat_id,
+                days=days,
+                instructions=instructions,
+                plan_id=plan_id,
+                topic=topic,
+            )
         )
 
     # --- Вспомогательное ----------------------------------------------------------------------
 
     async def _schedule_analysis(self, turn: Turn, project: Project, *, force: bool = False) -> None:
         """Поставить изучение источников в очередь; задача уйдёт после фиксации транзакции."""
-        await self._jobs.enqueue_profile_analysis(
+        await self._jobs.enqueue(
             ProfileAnalysisJob(project_id=project.id, user_id=turn.user.id, chat_id=turn.chat_id, force=force)
         )
 

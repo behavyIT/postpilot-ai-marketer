@@ -16,9 +16,11 @@ from app.ai.llm.service import LLMService
 from app.bot.notifier import Notifier, TelegramNotifier
 from app.core.config import Settings
 from app.db.session import create_engine, create_session_factory
+from app.domain.enums import Platform
 from app.integrations.storage.local import LocalFileStorage
 from app.integrations.web.crawler import SiteCrawler
 from app.integrations.web.fetcher import SafeFetcher
+from app.services.content_generation import ContentGenerationService
 from app.services.profile_analysis import ProfileAnalysisService
 
 
@@ -31,6 +33,7 @@ class WorkerDeps:
     llm: LLMService
     fetcher: SafeFetcher | None
     profile_service: ProfileAnalysisService
+    content_service: ContentGenerationService
     notifier: Notifier
     bot: Bot | None = None
 
@@ -73,6 +76,7 @@ async def build_worker_deps(settings: Settings) -> WorkerDeps:
         llm=llm,
         fetcher=fetcher,
         profile_service=profile_service,
+        content_service=ContentGenerationService(session_factory, llm=llm, platforms=[Platform.TELEGRAM]),
         notifier=TelegramNotifier(bot),
         bot=bot,
     )

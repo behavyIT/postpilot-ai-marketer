@@ -113,7 +113,7 @@ async def test_buttons_cannot_switch_to_foreign_project(
     assert stranger_turn.project is None
 
     garbage = await orchestrator.handle_button(stranger_turn, Action.PROJECT_SWITCH, "не-uuid")
-    assert "Проект не найден" in garbage.text
+    assert "Кнопка устарела" in garbage.text
 
 
 async def test_pause_and_resume(session: AsyncSession, test_settings: Settings) -> None:
@@ -134,13 +134,13 @@ async def test_pause_and_resume(session: AsyncSession, test_settings: Settings) 
 
 async def test_future_features_show_understanding(session: AsyncSession, test_settings: Settings) -> None:
     user = await make_user(session, 5008)
-    provider = FakeLLMProvider(intent("create_plan", period_days=14))
+    provider = FakeLLMProvider(intent("analytics", period_days=30))
     orchestrator = make_orchestrator(session, test_settings, provider)
     turn = await turn_for(session, user)
 
-    reply = await orchestrator.handle_text(turn, "Составь контент-план на две недели")
+    reply = await orchestrator.handle_text(turn, "Проанализируй статистику за месяц")
 
-    assert "контент-план на две недели" in reply.text
+    assert "отчёт по статистике публикаций за месяц" in reply.text
     assert "ближайших обновлениях" in reply.text
 
 
@@ -178,18 +178,18 @@ async def test_history_is_saved_and_passed_to_classifier(
     def responder(request: LLMRequest) -> dict[str, object]:
         seen.append(request)
         if len(seen) == 1:
-            return intent("create_plan", confidence=0.4, clarification_question="На какой период?")
-        return intent("create_plan", period_days=7)
+            return intent("analytics", confidence=0.4, clarification_question="На какой период?")
+        return intent("analytics", period_days=7)
 
     orchestrator = make_orchestrator(session, test_settings, FakeLLMProvider(responder=responder))
     turn = await turn_for(session, user)
 
-    await orchestrator.handle_text(turn, "Сделай контент-план")
-    reply = await orchestrator.handle_text(turn, "на неделю")
+    await orchestrator.handle_text(turn, "Сделай отчёт")
+    reply = await orchestrator.handle_text(turn, "за неделю")
 
-    assert "на неделю" in reply.text
+    assert "за неделю" in reply.text
     second_call = [m.content for m in seen[1].messages[1:]]
-    assert second_call == ["Сделай контент-план", "На какой период?", "на неделю"]
+    assert second_call == ["Сделай отчёт", "На какой период?", "за неделю"]
     stored = await session.scalar(
         select(func.count()).select_from(ConversationMessage).where(ConversationMessage.user_id == user.id)
     )
@@ -236,10 +236,10 @@ async def test_profile_shows_collected_sources(session: AsyncSession, test_setti
 
 async def test_user_text_is_html_escaped_in_replies(session: AsyncSession, test_settings: Settings) -> None:
     user = await make_user(session, 5014)
-    provider = FakeLLMProvider(intent("create_post", topic="<script>alert(1)</script>"))
+    provider = FakeLLMProvider(intent("generate_image", topic="<script>alert(1)</script>"))
     orchestrator = make_orchestrator(session, test_settings, provider)
 
-    reply = await orchestrator.handle_text(await turn_for(session, user), "пост про <script>")
+    reply = await orchestrator.handle_text(await turn_for(session, user), "картинку про <script>")
 
     assert "<script>" not in reply.text
     assert "&lt;script&gt;" in reply.text

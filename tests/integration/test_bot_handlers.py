@@ -81,7 +81,7 @@ async def test_menu_command_runs_intent_without_model(
     await menu_command(message("/plan", 6002), command, state, await turn_for(session, user), orchestrator)
 
     assert provider.requests == []
-    assert "контент-план" in sent[-1]["text"]
+    assert "мне нужно узнать бизнес" in sent[-1]["text"]  # без профиля план не строится
     assert await state.get_state() is None  # команда сбрасывает ожидание ввода
 
 
