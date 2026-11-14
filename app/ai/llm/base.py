@@ -17,6 +17,7 @@ class ModelProfile(StrEnum):
 
     SMART = "smart"  # стратегия, контент-план, тексты
     FAST = "fast"  # классификация, извлечение, проверки
+    VISION = "vision"  # распознавание изображений
 
 
 Role = Literal["system", "user", "assistant"]
@@ -29,6 +30,13 @@ class LLMMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageInput:
+    data: bytes
+    mime_type: str
+    filename: str = "image"
+
+
+@dataclass(frozen=True, slots=True)
 class LLMRequest:
     model: str
     messages: list[LLMMessage]
@@ -36,6 +44,8 @@ class LLMRequest:
     temperature: float | None = None
     # JSON Schema ответа: провайдер просит модель вернуть JSON строго по ней.
     json_schema: dict[str, Any] | None = None
+    # Изображения прикладываются к последнему сообщению пользователя.
+    images: tuple[ImageInput, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +67,7 @@ class LLMProvider(Protocol):
     # Умеет ли API принимать JSON Schema ответа параметром. Если да, схему не дублируем
     # текстом в промпте: у GigaChat Lite дублирование даёт пустые ответы (замер 14.11.2026).
     supports_json_schema: bool
+    supports_images: bool
 
     async def complete(self, request: LLMRequest) -> LLMResponse: ...
 

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import messages as msg
 from app.agents.orchestrator.intents import CONFIDENCE_THRESHOLD, Intent, IntentClassifier, IntentResult
+from app.agents.orchestrator.profile_view import profile_reply
 from app.agents.orchestrator.replies import Action, Button, Expect, Reply
 from app.ai.llm.base import LLMError, LLMMessage
 from app.ai.llm.service import CallContext, LLMService
@@ -22,8 +23,11 @@ from app.core.logging import get_logger
 from app.db.models import Project, User
 from app.domain.enums import DocumentType, MessageRole, ProjectStatus
 from app.integrations.storage.base import FileStorage
+from app.schemas.business_profile import BusinessProfileData
 from app.services.access import AccessService
 from app.services.conversation import ConversationService
+from app.services.jobs import JobQueue, ProfileAnalysisJob
+from app.services.profile_analysis import load_latest_profile
 from app.services.sources import SourceService
 
 log = get_logger(__name__)
@@ -61,6 +65,7 @@ class Turn:
     user: User
     project: Project | None
     telegram_message_id: int | None = None
+    chat_id: int | None = None  # куда воркер пришлёт результат фоновой задачи
 
 
 class Orchestrator:
@@ -71,7 +76,10 @@ class Orchestrator:
         llm: LLMService,
         storage: FileStorage,
         settings: Settings,
+        jobs: JobQueue,
     ) -> None:
+        self._session = session
+        self._jobs = jobs
         self._access = AccessService(session, default_timezone=settings.default_timezone)
         self._sources = SourceService(session, storage, max_upload_bytes=settings.max_upload_mb * 1024 * 1024)
         self._conversation = ConversationService(session)
@@ -133,10 +141,9 @@ class Orchestrator:
                 label = _DOC_LABELS.get(DocumentType(document.doc_type), document.doc_type)
                 text = (
                     f"{prefix}Сохранил «{msg.q(document.title)}» ({label}, {_size(len(data))}) "
-                    f"в источники проекта «{msg.q(project.name)}».\n\n"
-                    "Можно прислать ещё файлы или ссылку на сайт. Изучу источники и составлю профиль "
-                    "бизнеса — эта функция появится в ближайшем обновлении."
+                    f"в источники проекта «{msg.q(project.name)}».\n\n{msg.ANALYSIS_STARTED}"
                 )
+                await self._schedule_analysis(turn, project)
             reply = Reply(text=text, intent="add_document")
         except AppError as exc:
             reply = Reply(text=str(exc), intent="error")
@@ -162,6 +169,13 @@ class Orchestrator:
                 return Reply(text=msg.ASK_PROJECT_NAME, expect=Expect.PROJECT_NAME, intent="create_project")
             if action is Action.PROJECT_LIST:
                 return await self._list_projects(turn)
+            if action is Action.PROFILE_SHOW:
+                return await self._show_profile(turn)
+            if action is Action.PROFILE_REFRESH:
+                if turn.project is None:
+                    return Reply(text=msg.NO_PROJECT, intent="error")
+                await self._schedule_analysis(turn, turn.project, force=True)
+                return Reply(text=msg.PROFILE_REFRESHING, intent="profile_refresh")
             return Reply(text=msg.HELP, intent="help")
         except (ValueError, NotFoundError):
             return Reply(text="Проект не найден — откройте список заново: /project", intent="error")
@@ -228,19 +242,13 @@ class Orchestrator:
             if created
             else f"Записал это в проект «{msg.q(project.name)}»."
         )
-        return Reply(
-            text=(
-                f"{head}\n\n"
-                "Чтобы я узнал бизнес лучше, пришлите ссылку на сайт и документы: презентацию, прайс, "
-                "описание услуг. Из всех источников я составлю профиль бизнеса — это появится "
-                "в ближайшем обновлении."
-            ),
-            intent=Intent.DESCRIBE_BUSINESS,
-        )
+        await self._schedule_analysis(turn, project)
+        return Reply(text=f"{head}\n\n{msg.NOTE_SAVED_HINT}", intent=Intent.DESCRIBE_BUSINESS)
 
     async def _add_websites(self, turn: Turn, text: str, urls: list[str]) -> Reply:
         project, created_project = await self._ensure_project(turn, None)
         lines: list[str] = []
+        added = False
         for raw in urls[:MAX_URLS_PER_MESSAGE]:
             try:
                 website, created = await self._sources.add_website(turn.user, project, raw)
@@ -248,6 +256,7 @@ class Orchestrator:
                 lines.append(f"✗ {msg.q(raw)} — {exc}")
                 continue
             lines.append(("✓ " if created else "• уже был: ") + msg.q(website.url))
+            added = added or created
 
         remainder = text
         for raw in urls:
@@ -256,13 +265,15 @@ class Orchestrator:
             await self._sources.add_note(
                 turn.user, project, text, telegram_message_id=turn.telegram_message_id
             )
+            added = True
 
+        if added:
+            await self._schedule_analysis(turn, project)
         return Reply(
             text=(
                 f"{_created_prefix(project, created_project)}Сайты в проекте «{msg.q(project.name)}»:\n"
                 + "\n".join(lines)
-                + "\n\nИзучу их вместе с остальными источниками — "
-                "анализ сайтов появится в ближайшем обновлении."
+                + (f"\n\n{msg.ANALYSIS_STARTED}" if added else "")
             ),
             intent=Intent.ADD_WEBSITE,
         )
@@ -270,21 +281,28 @@ class Orchestrator:
     async def _show_profile(self, turn: Turn) -> Reply:
         if turn.project is None:
             return Reply(text=msg.NO_PROJECT, intent=Intent.SHOW_PROFILE)
+        latest = await load_latest_profile(self._session, turn.project.id)
+        if latest is not None:
+            return profile_reply(
+                turn.project.name,
+                BusinessProfileData.model_validate(latest.data),
+                version=latest.version_no,
+                questions=list(latest.questions),
+            )
         summary = await self._sources.summary(turn.project.id)
         if summary.total == 0:
             return Reply(
                 text=f"Про «{msg.q(turn.project.name)}» я пока ничего не знаю. {msg.ASK_ABOUT_BUSINESS}",
                 intent=Intent.SHOW_PROFILE,
             )
-        recent = "\n".join(f"• {msg.q(title)}" for title in summary.recent_titles)
         return Reply(
             text=(
                 f"<b>{msg.q(turn.project.name)}</b>\n\n"
                 f"Собрано источников: сайтов — {summary.websites}, документов — {summary.documents}, "
-                f"сообщений о бизнесе — {summary.notes}.\n"
-                + (f"\nПоследние:\n{recent}\n" if recent else "")
-                + "\nПрофиль бизнеса ещё не составлен: анализ источников появится в ближайшем обновлении."
+                f"сообщений о бизнесе — {summary.notes}.\n\n"
+                "Профиль бизнеса ещё не готов. Если я его не прислал, нажмите кнопку — изучу источники."
             ),
+            buttons=[[Button(text="🔍 Изучить источники", action=Action.PROFILE_REFRESH)]],
             intent=Intent.SHOW_PROFILE,
         )
 
@@ -356,6 +374,12 @@ class Orchestrator:
         )
 
     # --- Вспомогательное ----------------------------------------------------------------------
+
+    async def _schedule_analysis(self, turn: Turn, project: Project, *, force: bool = False) -> None:
+        """Поставить изучение источников в очередь; задача уйдёт после фиксации транзакции."""
+        await self._jobs.enqueue_profile_analysis(
+            ProfileAnalysisJob(project_id=project.id, user_id=turn.user.id, chat_id=turn.chat_id, force=force)
+        )
 
     async def _ensure_project(self, turn: Turn, name: str | None) -> tuple[Project, bool]:
         if turn.project is not None:

@@ -230,7 +230,8 @@ async def test_profile_shows_collected_sources(session: AsyncSession, test_setti
     await orchestrator.handle_text(turn, "coffee.ru", urls=["coffee.ru"])
     profile = await orchestrator.handle_command(turn, Intent.SHOW_PROFILE, "/profile")
     assert "сайтов — 1" in profile.text
-    assert "Профиль бизнеса ещё не составлен" in profile.text
+    assert "Профиль бизнеса ещё не готов" in profile.text
+    assert profile.buttons[0][0].action == "profile.refresh"
 
 
 async def test_user_text_is_html_escaped_in_replies(session: AsyncSession, test_settings: Settings) -> None:

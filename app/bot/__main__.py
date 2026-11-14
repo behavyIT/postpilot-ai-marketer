@@ -20,6 +20,8 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import create_engine, create_session_factory
 from app.integrations.storage.local import LocalFileStorage
+from app.workers.broker import broker
+from app.workers.queue import TaskiqJobQueue
 
 COMMANDS = [
     BotCommand(command="start", description="Начало работы"),
@@ -77,7 +79,7 @@ async def main() -> None:
     dispatcher["settings"] = settings
     dispatcher["llm"] = llm
     dispatcher["file_storage"] = LocalFileStorage(settings.files_dir)
-    dispatcher.update.outer_middleware(DbSessionMiddleware(session_factory))
+    dispatcher.update.outer_middleware(DbSessionMiddleware(session_factory, TaskiqJobQueue(redis)))
     dispatcher.message.outer_middleware(
         RateLimitMiddleware(redis, per_minute=settings.user_messages_per_minute)
     )
@@ -86,12 +88,14 @@ async def main() -> None:
     dispatcher.errors.register(on_error)
     dispatcher.include_router(build_router())
 
+    await broker.startup()  # бот ставит задачи в очередь воркера
     try:
         me = await bot.get_me()
         log.info("bot.started", username=me.username)
         await bot.set_my_commands(COMMANDS)
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
+        await broker.shutdown()
         await llm.aclose()
         await redis.aclose()
         await engine.dispose()

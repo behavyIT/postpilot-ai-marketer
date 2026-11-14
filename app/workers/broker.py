@@ -30,6 +30,16 @@ broker = _create_broker()
 
 
 @broker.on_event(TaskiqEvents.WORKER_STARTUP)
-async def _on_worker_startup(_state: TaskiqState) -> None:
+async def _on_worker_startup(state: TaskiqState) -> None:
+    from app.workers.deps import build_worker_deps  # импорт здесь: зависимости нужны только воркеру
+
     settings = get_settings()
     configure_logging(settings.log_level, json=settings.log_json)
+    state.deps = await build_worker_deps(settings)
+
+
+@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
+async def _on_worker_shutdown(state: TaskiqState) -> None:
+    deps = getattr(state, "deps", None)
+    if deps is not None:
+        await deps.aclose()

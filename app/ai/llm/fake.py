@@ -19,10 +19,12 @@ class FakeLLMProvider:
         *responses: str | dict[str, Any] | Exception,
         responder: Responder | None = None,
         supports_json_schema: bool = True,
+        supports_images: bool = True,
     ) -> None:
         self._responses = list(responses)
         self._responder = responder
         self.supports_json_schema = supports_json_schema
+        self.supports_images = supports_images
         self.requests: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:

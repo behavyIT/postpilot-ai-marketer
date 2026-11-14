@@ -16,6 +16,8 @@ from uuid import UUID
 from pydantic import BaseModel, ValidationError
 
 from app.ai.llm.base import (
+    ImageInput,
+    LLMConfigError,
     LLMError,
     LLMMessage,
     LLMOutputError,
@@ -60,7 +62,26 @@ class LLMService:
         self._usage = usage
 
     def model_for(self, profile: ModelProfile) -> str:
-        return self._models[profile]
+        return self._models.get(profile) or self._models[ModelProfile.SMART]
+
+    @property
+    def supports_images(self) -> bool:
+        return self._provider.supports_images
+
+    async def describe_image(
+        self, image: ImageInput, prompt: str, *, ctx: CallContext, max_tokens: int = 1500
+    ) -> str:
+        """Текст и описание изображения от мультимодальной модели."""
+        if not self._provider.supports_images:
+            raise LLMConfigError("Текущая модель не умеет читать изображения")
+        request = LLMRequest(
+            model=self.model_for(ModelProfile.VISION),
+            messages=[LLMMessage(role="user", content=prompt)],
+            max_tokens=max_tokens,
+            images=(image,),
+        )
+        response = await self._call(request, ctx)
+        return response.text.strip()
 
     async def text(
         self,

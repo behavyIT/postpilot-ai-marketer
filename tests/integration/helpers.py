@@ -18,6 +18,7 @@ from app.core.config import Settings
 from app.db.models import User
 from app.integrations.storage.local import LocalFileStorage
 from app.services.access import AccessService, TelegramProfile
+from app.services.jobs import JobQueue, MemoryJobQueue
 
 
 async def make_user(session: AsyncSession, telegram_id: int, first_name: str = "Анна") -> User:
@@ -32,19 +33,27 @@ def intent(name: str, confidence: float = 0.95, **params: Any) -> dict[str, Any]
     return {"intent": name, "confidence": confidence, **params}
 
 
-def make_orchestrator(session: AsyncSession, settings: Settings, provider: FakeLLMProvider) -> Orchestrator:
+def make_orchestrator(
+    session: AsyncSession, settings: Settings, provider: FakeLLMProvider, jobs: JobQueue | None = None
+) -> Orchestrator:
     llm = LLMService(
         provider,
         models={ModelProfile.SMART: "ultra", ModelProfile.FAST: "lite"},
         limiter=NullLimiter(),
         usage=MemoryUsageSink(),
     )
-    return Orchestrator(session, llm=llm, storage=LocalFileStorage(settings.files_dir), settings=settings)
+    return Orchestrator(
+        session,
+        llm=llm,
+        storage=LocalFileStorage(settings.files_dir),
+        settings=settings,
+        jobs=jobs or MemoryJobQueue(),
+    )
 
 
 async def turn_for(session: AsyncSession, user: User) -> Turn:
     project = await AccessService(session, default_timezone="Europe/Moscow").get_active_project(user)
-    return Turn(user=user, project=project, telegram_message_id=1)
+    return Turn(user=user, project=project, telegram_message_id=1, chat_id=777)
 
 
 def docx_bytes(text: str = "Описание услуг") -> bytes:
@@ -52,4 +61,16 @@ def docx_bytes(text: str = "Описание услуг") -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("word/document.xml", f"<w:document>{text}</w:document>")
+    return buffer.getvalue()
+
+
+def real_docx_bytes(*paragraphs: str) -> bytes:
+    """Настоящий DOCX (python-docx), который можно прочитать."""
+    from docx import Document
+
+    document = Document()
+    for paragraph in paragraphs:
+        document.add_paragraph(paragraph)
+    buffer = io.BytesIO()
+    document.save(buffer)
     return buffer.getvalue()

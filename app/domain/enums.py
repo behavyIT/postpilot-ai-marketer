@@ -70,6 +70,39 @@ class LLMCallStatus(StrEnum):
     INVALID_OUTPUT = "invalid_output"
 
 
+class ProfileField(StrEnum):
+    """14 пунктов профиля бизнеса из ТЗ (§2.2)."""
+
+    COMPANY_NAME = "company_name"
+    INDUSTRY = "industry"
+    PRODUCTS_SERVICES = "products_services"
+    TARGET_AUDIENCE = "target_audience"
+    GEOGRAPHY = "geography"
+    UNIQUE_SELLING_POINTS = "unique_selling_points"
+    COMPETITIVE_ADVANTAGES = "competitive_advantages"
+    PRICING = "pricing"
+    COMMUNICATION_STYLE = "communication_style"
+    PRODUCT_BENEFITS = "product_benefits"
+    CUSTOMER_PAINS = "customer_pains"
+    FAQ = "faq"
+    ADVERTISING_RESTRICTIONS = "advertising_restrictions"
+    CONTACTS = "contacts"
+
+
+class SourceKind(StrEnum):
+    NOTE = "note"
+    WEBSITE_PAGE = "website_page"
+    DOCUMENT = "document"
+
+
+class FactStatus(StrEnum):
+    """Насколько можно доверять факту."""
+
+    CONFIRMED = "confirmed"  # сказал сам пользователь
+    INFERRED = "inferred"  # найдено в источниках (сайт, документы)
+    MISSING = "missing"  # данных нет
+
+
 def check_values(enum_cls: type[StrEnum]) -> str:
     """SQL-список значений для CHECK-ограничения: 'a', 'b', 'c'."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)

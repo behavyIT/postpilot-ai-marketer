@@ -1,12 +1,13 @@
 """Источники знаний о бизнесе: файлы, документы, сайты и заметки из чата.
 
-На Этапе 3 источники только принимаются и сохраняются (статус pending);
-извлечение текста и анализ — Этап 4.
+Жизненный цикл: источник принят (pending) → текст извлечён (processed) →
+из текста извлечены факты для профиля (analyzed_at заполнен).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -62,6 +64,10 @@ class BusinessDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), default=SourceStatus.PENDING)
     error: Mapped[str | None] = mapped_column(Text)
     created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    extracted_text: Mapped[str | None] = mapped_column(Text)
+    page_count: Mapped[int | None]
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Website(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -77,6 +83,29 @@ class Website(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    pages_count: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class WebsitePage(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """Страница сайта с извлечённым текстом. Хранится источник и время получения."""
+
+    __tablename__ = "website_pages"
+    __table_args__ = (
+        UniqueConstraint("website_id", "url"),
+        Index("ix_website_pages_project_id", "project_id"),
+    )
+
+    website_id: Mapped[UUID] = mapped_column(ForeignKey("websites.id", ondelete="CASCADE"))
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    url: Mapped[str] = mapped_column(String(2048))
+    title: Mapped[str | None] = mapped_column(String(512))
+    description: Mapped[str | None] = mapped_column(Text)
+    http_status: Mapped[int]
+    content_hash: Mapped[str] = mapped_column(String(64))
+    text: Mapped[str] = mapped_column(Text)
+    structured_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class BusinessNote(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -92,3 +121,4 @@ class BusinessNote(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     text: Mapped[str] = mapped_column(Text)
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

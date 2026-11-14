@@ -42,7 +42,14 @@ class Settings(BaseSettings):
     gigachat_ca_bundle: Path = BASE_DIR / "certs" / "russian_trusted_ca_bundle.pem"
     gigachat_model_smart: str = "GigaChat-3-Ultra"
     gigachat_model_fast: str = "GigaChat-2"
+    gigachat_model_vision: str = "GigaChat-2-Max"
     gigachat_timeout_s: float = 120.0
+
+    # Изучение бизнеса: сколько страниц сайта читать и пауза между запросами к сайту.
+    crawl_max_pages: int = 12
+    crawl_delay_s: float = 0.3
+    # Пауза перед анализом: источники, присланные подряд, обрабатываются одним запуском.
+    profile_batch_delay_s: float = 8.0
 
     # Очередь к модели: бесплатный тариф GigaChat — один запрос одновременно.
     llm_lock_ttl_s: float = 180.0

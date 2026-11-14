@@ -24,6 +24,7 @@ def create_llm_service(
         models={
             ModelProfile.SMART: settings.gigachat_model_smart,
             ModelProfile.FAST: settings.gigachat_model_fast,
+            ModelProfile.VISION: settings.gigachat_model_vision,
         },
         limiter=RedisLimiter(
             redis, "llm:gigachat:slot", ttl_s=settings.llm_lock_ttl_s, wait_s=settings.llm_queue_wait_s

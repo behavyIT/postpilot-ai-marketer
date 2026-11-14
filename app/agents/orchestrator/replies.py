@@ -22,6 +22,8 @@ class Action(StrEnum):
     PROJECT_SWITCH = "project.switch"
     PROJECT_NEW = "project.new"
     PROJECT_LIST = "project.list"
+    PROFILE_REFRESH = "profile.refresh"
+    PROFILE_SHOW = "profile.show"
     HELP = "help"
 
 

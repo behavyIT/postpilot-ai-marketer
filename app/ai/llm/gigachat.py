@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 
 import httpx
 import pydantic
@@ -34,6 +35,7 @@ _ROLES = {"system": MessagesRole.SYSTEM, "user": MessagesRole.USER, "assistant":
 class GigaChatProvider:
     name = "gigachat"
     supports_json_schema = True
+    supports_images = True  # через загрузку файла и attachments (проверено на тарифе физлица)
 
     def __init__(self, settings: Settings) -> None:
         if settings.gigachat_auth_key is None:
@@ -50,18 +52,26 @@ class GigaChatProvider:
         )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        chat = Chat(
-            model=request.model,
-            messages=_to_gigachat_messages(request.messages),
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-            response_format=(
-                {"type": "json_schema", "schema": request.json_schema, "strict": False}
-                if request.json_schema is not None
-                else None
-            ),
-        )
+        uploaded: list[str] = []
         try:
+            for image in request.images:
+                file = await self._client.aupload_file((image.filename, image.data, image.mime_type))
+                uploaded.append(file.id_)
+            messages = _to_gigachat_messages(request.messages)
+            if uploaded:
+                last_user = max(i for i, m in enumerate(messages) if m.role == MessagesRole.USER)
+                messages[last_user].attachments = uploaded
+            chat = Chat(
+                model=request.model,
+                messages=messages,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                response_format=(
+                    {"type": "json_schema", "schema": request.json_schema, "strict": False}
+                    if request.json_schema is not None
+                    else None
+                ),
+            )
             completion = await self._client.achat(chat)
         except gc_errors.RateLimitError as exc:
             raise LLMRateLimitError("GigaChat ограничил частоту запросов, попробуйте через минуту") from exc
@@ -79,6 +89,11 @@ class GigaChatProvider:
             # API иногда присылает пустое сообщение без role, и SDK не может его разобрать.
             # Отдаём пустой ответ: LLMService повторит запрос.
             return LLMResponse(text="", model=request.model, finish_reason="empty")
+        finally:
+            for file_id in uploaded:
+                # Файлы во внешнем хранилище не оставляем; неудача удаления не должна ломать ответ.
+                with suppress(gc_errors.GigaChatException, httpx.HTTPError):
+                    await self._client.adelete_file(file_id)
 
         choice = completion.choices[0]
         return LLMResponse(
